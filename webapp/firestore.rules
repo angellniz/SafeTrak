@@ -1,0 +1,138 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Returns the real administrator UID for either:
+    // 1) a normal Firebase Auth admin session, or
+    // 2) a dashboard-code Firebase Auth session stored in admin_access.
+    function primaryAdminUid() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        ? request.auth.uid
+        : (
+            signedIn() && exists(/databases/$(database)/documents/admin_access/$(request.auth.uid))
+              ? get(/databases/$(database)/documents/admin_access/$(request.auth.uid)).data.admin_uid
+              : ''
+          );
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && primaryAdminUid() != ''
+        && exists(/databases/$(database)/documents/admins/$(primaryAdminUid()))
+        && get(/databases/$(database)/documents/admins/$(primaryAdminUid())).data.role == 'Admin';
+    }
+
+    function adminData() {
+      return get(/databases/$(database)/documents/admins/$(primaryAdminUid())).data;
+    }
+
+    // IMPORTANT:
+    // Do NOT use isAdmin() to authorize reads/updates of admins/{uid} itself.
+    // isAdmin() reads admins/{uid}, which can cause the target admin document
+    // authorization to recurse/fail. Authorize that document directly instead.
+    function canAccessAdminDocument(uid) {
+      return signedIn()
+        && resource.data.role == 'Admin'
+        && (
+          request.auth.uid == uid
+          || (
+            exists(/databases/$(database)/documents/admin_access/$(request.auth.uid))
+            && get(/databases/$(database)/documents/admin_access/$(request.auth.uid)).data.admin_uid == uid
+          )
+        );
+    }
+
+    match /institutions/{institutionId} {
+      // Institution lookup is needed during admin registration.
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /admins/{uid} {
+      // First-time administrator registration.
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.role == 'Admin'
+        && exists(/databases/$(database)/documents/institutions/$(request.resource.data.institution_id))
+        && get(/databases/$(database)/documents/institutions/$(request.resource.data.institution_id)).data.code == request.resource.data.institution_code;
+
+      // Existing admin profile / dashboard-code session.
+      allow read: if canAccessAdminDocument(uid);
+
+      // Admin may update their own profile, including dashboard-code fields,
+      // but cannot change their institution or role.
+      allow update: if canAccessAdminDocument(uid)
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.institution_id == resource.data.institution_id
+        && request.resource.data.institution_code == resource.data.institution_code;
+
+      allow delete: if false;
+    }
+
+    match /admin_access/{accessUid} {
+      // A code-authenticated session reads only its own mapping.
+      allow read: if signedIn() && request.auth.uid == accessUid;
+
+      // A real administrator creates the mapping for their own UID.
+      allow create: if isAdmin()
+        && request.resource.data.admin_uid == primaryAdminUid();
+
+      allow delete: if isAdmin()
+        && resource.data.admin_uid == primaryAdminUid();
+
+      allow update: if false;
+    }
+
+    match /students/{studentId} {
+      // Guardians use a client-side Card ID + guardian-phone match, so the
+      // exact student document must be readable without an admin session.
+      // Admin list/query access remains institution-scoped below.
+      allow get: if true;
+      // Guardian login is a client-side Card ID + phone match. The exact
+      // document read is intentionally public in this prototype; list/query
+      // access remains restricted to administrators.
+      allow list: if isAdmin();
+
+      allow create: if isAdmin()
+        && request.resource.data.institution_id == adminData().institution_code;
+
+      allow update: if isAdmin()
+        && resource.data.institution_id == adminData().institution_code
+        && request.resource.data.institution_id == adminData().institution_code;
+
+      allow delete: if isAdmin()
+        && resource.data.institution_id == adminData().institution_code;
+    }
+
+    // Guardian history is stored inside each student document as:
+    // students/{cardId}/logs/{logId}
+    // Logs are read-only from the guardian client. No existing database
+    // collections or fields are changed by this rule.
+    match /students/{studentId}/logs/{logId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /alerts/{alertId} {
+      // Guardian history is read-only. The guardian UI filters by student_id.
+      // This mirrors the project's documented prototype access model.
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /locations/{cardId} {
+      // Live coordinates are intentionally readable only without an admin auth
+      // session, keeping the admin privacy boundary intact.
+      allow get: if request.auth == null;
+      allow list: if false;
+      allow write: if false;
+    }
+
+    match /device_ingest/{documentId} {
+      allow read, write: if false;
+    }
+  }
+}

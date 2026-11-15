@@ -1,0 +1,638 @@
+#include "secrets.h"
+
+#define BLYNK_TEMPLATE_ID "YOUR_TEMPLATE_ID"
+#define BLYNK_TEMPLATE_NAME "YOUR_TEMPLATE_NAME"
+#define BLYNK_AUTH_TOKEN SECRET_BLYNK_AUTH_TOKEN
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <Wire.h>
+#include <TinyGPSPlus.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+
+// ==========================================
+// WiFi
+// ==========================================
+
+char ssid[] = WIFI_SSID;
+char pass[] = WIFI_PASSWORD;
+
+// ==========================================
+// GPS
+// ==========================================
+
+TinyGPSPlus gps;
+HardwareSerial GPSserial(2);
+
+#define GPS_RX 4
+#define GPS_TX 5
+
+// ==========================================
+// MPU6050
+// ==========================================
+
+Adafruit_MPU6050 mpu;
+
+// ==========================================
+// Blynk Timer
+// ==========================================
+
+BlynkTimer timer;
+
+// ==========================================
+// Y / Z AXIS FAULT SETTINGS
+// ==========================================
+
+// X axis is considered STABLE / REFERENCE
+// X axis is NOT used for fault detection.
+
+// Y and Z sudden change threshold
+#define Y_AXIS_CHANGE_THRESHOLD 8.0
+#define Z_AXIS_CHANGE_THRESHOLD 8.0
+
+// Y/Z axis absolute acceleration threshold
+#define Y_FAULT_THRESHOLD 12.0
+#define Z_FAULT_THRESHOLD 12.0
+
+// Fault confirmation time
+#define FALL_CONFIRM_TIME 500
+
+// Emergency cooldown
+const unsigned long ALERT_COOLDOWN = 10000;
+
+unsigned long lastEmergencyTime = 0;
+
+// ==========================================
+// FALL VARIABLES
+// ==========================================
+
+bool fallDetected = false;
+
+unsigned long fallStartTime = 0;
+
+// Previous axis values
+float previousX = 0;
+float previousY = 0;
+float previousZ = 0;
+
+bool firstReading = true;
+
+// ==========================================
+// GPS READ
+// ==========================================
+
+void readGPS()
+{
+  while (GPSserial.available())
+  {
+    gps.encode(GPSserial.read());
+  }
+}
+
+// ==========================================
+// GPS UPDATE
+// ==========================================
+
+void updateGPS()
+{
+  readGPS();
+
+  if (gps.location.isValid())
+  {
+    double latitude = gps.location.lat();
+    double longitude = gps.location.lng();
+
+    Blynk.virtualWrite(
+      V0,
+      "GPS: Location Available"
+    );
+
+    Blynk.virtualWrite(
+      V3,
+      latitude
+    );
+
+    Blynk.virtualWrite(
+      V4,
+      longitude
+    );
+
+    Serial.println();
+    Serial.println("========== GPS ==========");
+
+    Serial.print("Latitude: ");
+    Serial.println(latitude, 6);
+
+    Serial.print("Longitude: ");
+    Serial.println(longitude, 6);
+
+    Serial.println("=========================");
+  }
+  else
+  {
+    Blynk.virtualWrite(
+      V0,
+      "GPS: Searching..."
+    );
+
+    Serial.println("GPS Searching...");
+  }
+}
+
+// ==========================================
+// GOOGLE MAPS LINK
+// ==========================================
+
+String getGPSLink()
+{
+  if (gps.location.isValid())
+  {
+    String latitude =
+      String(gps.location.lat(), 6);
+
+    String longitude =
+      String(gps.location.lng(), 6);
+
+    String link =
+      "https://maps.google.com/?q=";
+
+    link += latitude;
+    link += ",";
+    link += longitude;
+
+    return link;
+  }
+
+  return "GPS Location Not Available";
+}
+
+// ==========================================
+// EMERGENCY ALERT
+// ==========================================
+
+void sendEmergencyAlert(String reason)
+{
+  if (
+    millis() - lastEmergencyTime <
+    ALERT_COOLDOWN
+  )
+  {
+    Serial.println(
+      "Emergency alert cooldown active"
+    );
+
+    return;
+  }
+
+  lastEmergencyTime = millis();
+
+  String message;
+
+  if (gps.location.isValid())
+  {
+    String link = getGPSLink();
+
+    message =
+      "EMERGENCY ALERT!\n";
+
+    message += reason;
+
+    message +=
+      "\nLocation:\n";
+
+    message += link;
+  }
+  else
+  {
+    message =
+      "EMERGENCY ALERT!\n";
+
+    message += reason;
+
+    message +=
+      "\nGPS Location Not Available";
+  }
+
+  Serial.println();
+  Serial.println(
+    "========== EMERGENCY =========="
+  );
+
+  Serial.println(message);
+
+  Serial.println(
+    "================================"
+  );
+
+  // Blynk Event
+  Blynk.logEvent(
+    "emergency_alert",
+    message
+  );
+}
+
+// ==========================================
+// MPU6050 Y / Z AXIS FAULT DETECTION
+// ==========================================
+
+void checkFall()
+{
+  sensors_event_t acceleration;
+  sensors_event_t gyro;
+  sensors_event_t temperature;
+
+  mpu.getEvent(
+    &acceleration,
+    &gyro,
+    &temperature
+  );
+
+  // ========================================
+  // CURRENT AXIS VALUES
+  // ========================================
+
+  float x =
+    acceleration.acceleration.x;
+
+  float y =
+    acceleration.acceleration.y;
+
+  float z =
+    acceleration.acceleration.z;
+
+  // ========================================
+  // AXIS CHANGE
+  // ========================================
+
+  // X change is calculated only for display.
+  // X is NOT used for fault detection.
+
+  float changeX =
+    abs(x - previousX);
+
+  float changeY =
+    abs(y - previousY);
+
+  float changeZ =
+    abs(z - previousZ);
+
+  // ========================================
+  // FIRST READING
+  // ========================================
+
+  if (firstReading)
+  {
+    previousX = x;
+    previousY = y;
+    previousZ = z;
+
+    firstReading = false;
+
+    return;
+  }
+
+  // ========================================
+  // SERIAL MONITOR
+  // ========================================
+
+  Serial.println();
+  Serial.println("========== MPU6050 ==========");
+
+  Serial.print("X Axis (STABLE): ");
+  Serial.print(x, 2);
+  Serial.println(" m/s2");
+
+  Serial.print("Y Axis: ");
+  Serial.print(y, 2);
+  Serial.println(" m/s2");
+
+  Serial.print("Z Axis: ");
+  Serial.print(z, 2);
+  Serial.println(" m/s2");
+
+  Serial.print("Y Change: ");
+  Serial.println(changeY, 2);
+
+  Serial.print("Z Change: ");
+  Serial.println(changeZ, 2);
+
+  // ========================================
+  // Y AXIS FAULT
+  // ========================================
+
+  bool yFault =
+    (abs(y) > Y_FAULT_THRESHOLD) &&
+    (changeY > Y_AXIS_CHANGE_THRESHOLD);
+
+  // ========================================
+  // Z AXIS FAULT
+  // ========================================
+
+  bool zFault =
+    (abs(z) > Z_FAULT_THRESHOLD) &&
+    (changeZ > Z_AXIS_CHANGE_THRESHOLD);
+
+  // ========================================
+  // Y OR Z FAULT DETECTED
+  // ========================================
+
+  if (
+    (yFault || zFault) &&
+    !fallDetected
+  )
+  {
+    fallDetected = true;
+
+    fallStartTime = millis();
+
+    Serial.println();
+    Serial.println(
+      "!!! FAULT DETECTED !!!"
+    );
+
+    String faultReason = "";
+
+    // Y Axis Fault
+    if (yFault)
+    {
+      Serial.println(
+        "FAULT DETECTED ON Y AXIS"
+      );
+
+      faultReason +=
+        "Y Axis Fault Detected";
+    }
+
+    // Z Axis Fault
+    if (zFault)
+    {
+      Serial.println(
+        "FAULT DETECTED ON Z AXIS"
+      );
+
+      if (faultReason.length() > 0)
+      {
+        faultReason +=
+          " + ";
+      }
+
+      faultReason +=
+        "Z Axis Fault Detected";
+    }
+
+    // ======================================
+    // BLYNK STATUS
+    // ======================================
+
+    Blynk.virtualWrite(
+      V1,
+      "FAULT DETECTED"
+    );
+
+    // ======================================
+    // EMERGENCY ALERT
+    // ======================================
+
+    sendEmergencyAlert(
+      faultReason
+    );
+  }
+
+  // ========================================
+  // RECOVERY
+  // ========================================
+
+  if (fallDetected)
+  {
+    if (
+      millis() - fallStartTime >
+      FALL_CONFIRM_TIME
+    )
+    {
+      // X axis is ignored for recovery.
+      // Only Y and Z are checked.
+
+      bool yNormal =
+        abs(y) < Y_FAULT_THRESHOLD;
+
+      bool zNormal =
+        abs(z) < Z_FAULT_THRESHOLD;
+
+      if (
+        yNormal &&
+        zNormal
+      )
+      {
+        fallDetected = false;
+
+        Serial.println();
+        Serial.println(
+          "SYSTEM NORMAL"
+        );
+
+        Blynk.virtualWrite(
+          V1,
+          "Fall Status: Normal"
+        );
+      }
+    }
+  }
+
+  // ========================================
+  // SAVE CURRENT VALUES
+  // ========================================
+
+  previousX = x;
+  previousY = y;
+  previousZ = z;
+
+  Serial.println(
+    "============================="
+  );
+}
+
+// ==========================================
+// SETUP
+// ==========================================
+
+void setup()
+{
+  // ========================================
+  // SERIAL
+  // ========================================
+
+  Serial.begin(115200);
+
+  delay(1000);
+
+  Serial.println();
+  Serial.println(
+    "================================"
+  );
+
+  Serial.println(
+    "EMERGENCY SAFETY SYSTEM"
+  );
+
+  Serial.println(
+    "Y / Z AXIS MPU6050 FAULT DETECTION"
+  );
+
+  Serial.println(
+    "X AXIS = STABLE / REFERENCE"
+  );
+
+  Serial.println(
+    "================================"
+  );
+
+  // ========================================
+  // I2C
+  // ========================================
+
+  Wire.begin(
+    21,
+    22
+  );
+
+  Serial.println(
+    "I2C Started"
+  );
+
+  // ========================================
+  // MPU6050
+  // ========================================
+
+  if (!mpu.begin())
+  {
+    Serial.println(
+      "MPU6050 NOT FOUND!"
+    );
+
+    while (1)
+    {
+      delay(1000);
+    }
+  }
+
+  Serial.println(
+    "MPU6050 Connected!"
+  );
+
+  // Accelerometer range
+  mpu.setAccelerometerRange(
+    MPU6050_RANGE_8_G
+  );
+
+  // Gyroscope range
+  mpu.setGyroRange(
+    MPU6050_RANGE_500_DEG
+  );
+
+  // Filter
+  mpu.setFilterBandwidth(
+    MPU6050_BAND_21_HZ
+  );
+
+  // ========================================
+  // GPS
+  // ========================================
+
+  GPSserial.begin(
+    9600,
+    SERIAL_8N1,
+    GPS_RX,
+    GPS_TX
+  );
+
+  Serial.println(
+    "GPS Serial Started"
+  );
+
+  // ========================================
+  // BLYNK + WIFI
+  // ========================================
+
+  Serial.println(
+    "Connecting to Blynk..."
+  );
+
+  Blynk.begin(
+    BLYNK_AUTH_TOKEN,
+    ssid,
+    pass
+  );
+
+  Serial.println(
+    "Blynk Connected!"
+  );
+
+  // ========================================
+  // INITIAL BLYNK STATUS
+  // ========================================
+
+  Blynk.virtualWrite(
+    V0,
+    "GPS: Searching..."
+  );
+
+  Blynk.virtualWrite(
+    V1,
+    "Fall Status: Normal"
+  );
+
+  Blynk.virtualWrite(
+    V3,
+    0
+  );
+
+  Blynk.virtualWrite(
+    V4,
+    0
+  );
+
+  // ========================================
+  // TIMERS
+  // ========================================
+
+  timer.setInterval(
+    1000L,
+    updateGPS
+  );
+
+  timer.setInterval(
+    500L,
+    checkFall
+  );
+
+  // ========================================
+  // READY
+  // ========================================
+
+  Serial.println();
+  Serial.println(
+    "SYSTEM READY"
+  );
+
+  Serial.println(
+    "X AXIS = STABLE"
+  );
+
+  Serial.println(
+    "Y / Z AXIS FAULT DETECTION ACTIVE"
+  );
+}
+
+// ==========================================
+// LOOP
+// ==========================================
+
+void loop()
+{
+  Blynk.run();
+
+  timer.run();
+
+  readGPS();
+}

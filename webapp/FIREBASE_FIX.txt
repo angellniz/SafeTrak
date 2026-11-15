@@ -1,0 +1,26 @@
+SAFETRAK GUARDIAN FIX
+======================
+
+The Guardian app now uses a separate Firestore client (safetrak-guardian)
+without the administrator Firebase Auth session attached. This prevents an
+old admin login from changing request.auth for guardian reads.
+
+IMPORTANT: Firestore rules are server-side and cannot be changed by the web
+app. The included firestore.rules MUST be published to project safetrack-47.
+
+From this folder:
+  npx firebase-tools login
+  npx firebase-tools use safetrack-47
+  npx firebase-tools deploy --only firestore:rules --project safetrack-47
+
+On Windows you can double-click:
+  deploy-firestore-rules.bat
+
+After publishing the rules:
+1. Stop the Vite server.
+2. Run npm install.
+3. Run npm run dev.
+4. Open /guardian.
+5. Test CHR-102 with the guardian phone registered on students/CHR-102.
+
+Existing Firestore collections/document IDs are unchanged.

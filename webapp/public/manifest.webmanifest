@@ -1,0 +1,9 @@
+{
+  "name": "SafeTrak Guardian",
+  "short_name": "SafeTrak",
+  "start_url": "/guardian",
+  "display": "standalone",
+  "background_color": "#224a72",
+  "theme_color": "#224a72",
+  "description": "SafeTrak guardian mobile web application"
+}
